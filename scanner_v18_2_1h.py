@@ -1,73 +1,166 @@
-
-"""
-V18.2 Matching Scanner — Top 50 Liquid Momentum Stocks (30-Min)
-
-Matches TradingView V18.2 logic exactly, using 30-minute candles.
-"""
-
+import streamlit as st
 import yfinance as yf
 import pandas as pd
-from tickers import TICKERS
+import numpy as np
+from datetime import datetime, timedelta
+
+st.set_page_config(layout="wide")
+st.title("V18.2 Hybrid ORB + Trend Pullback Scanner (1H)")
+
+# =============================
+# SETTINGS
+# =============================
+
+TICKERS = [
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","JPM","BAC","WMT",
+    "COST","HD","LOW","UNH","LLY","JNJ","PFE","XOM","CVX","KO",
+    "PEP","DIS","MCD","SBUX","NFLX","CRM","ORCL","ADBE","INTC","AMD",
+    "AVGO","QCOM","TXN","IBM","CAT","GE","BA","MMM","GS","MS",
+    "C","AXP","V","MA","PYPL","SHOP","NKE","TGT"
+]
 
 EMA_FAST = 9
 EMA_SLOW = 21
+ATR_LEN = 14
+ATR_AVG_LEN = 20
 
-def compute_signal(symbol):
-    df = yf.download(symbol, period="7d", interval="30m", progress=False)
-    if df.empty or len(df) < EMA_SLOW + 5:
-        return None
+ORB_MINUTES = 30
 
-    df["EMA9"] = df["Close"].ewm(span=EMA_FAST, adjust=False).mean()
-    df["EMA21"] = df["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
+# =============================
+# FUNCTIONS
+# =============================
 
+def add_indicators(df):
+    df["ema_fast"] = df["Close"].ewm(span=EMA_FAST).mean()
+    df["ema_slow"] = df["Close"].ewm(span=EMA_SLOW).mean()
+
+    tr = pd.concat([
+        df["High"] - df["Low"],
+        abs(df["High"] - df["Close"].shift()),
+        abs(df["Low"] - df["Close"].shift())
+    ], axis=1).max(axis=1)
+
+    df["atr"] = tr.rolling(ATR_LEN).mean()
+    df["atr_avg"] = df["atr"].rolling(ATR_AVG_LEN).mean()
+
+    return df
+
+
+def get_orb_levels(df):
+    df = df.copy()
+    df["date"] = df.index.date
+
+    today = df["date"].iloc[-1]
+    day_df = df[df["date"] == today]
+
+    if len(day_df) < 1:
+        return None, None, False
+
+    bars_needed = int((ORB_MINUTES * 60) / 3600)
+
+    orb_df = day_df.iloc[:bars_needed]
+
+    if len(orb_df) < bars_needed:
+        return None, None, False
+
+    return orb_df["High"].max(), orb_df["Low"].min(), True
+
+
+def check_signal(df):
+    df = df.dropna()
     last = df.iloc[-1]
+    prev = df.iloc[-2]
 
-    ema9 = last["EMA9"]
-    ema21 = last["EMA21"]
-    close = last["Close"]
-    open_ = last["Open"]
-    low = last["Low"]
-    high = last["High"]
+    or_high, or_low, orb_done = get_orb_levels(df)
 
-    trend_up = ema9 > ema21 and close > ema21
-    pullback = low <= ema9 and close > ema21
+    # === Trend filter ===
+    trend_up = last["ema_fast"] > last["ema_slow"] and last["Close"] > last["ema_slow"]
+    ema_slope_up = last["ema_fast"] > prev["ema_fast"]
 
-    body = abs(close - open_)
-    rng = max(high - low, 1e-6)
-    strong_bull = close > open_ and body >= 0.5 * rng
+    # === Volatility filter ===
+    vol_ok = last["atr"] > last["atr_avg"] * 0.8
 
-    if trend_up and pullback and strong_bull:
-        strength = body / rng
-        return {
-            "Ticker": symbol,
-            "Time": str(df.index[-1]),
-            "Close": round(float(close), 2),
-            "EMA9": round(float(ema9), 2),
-            "EMA21": round(float(ema21), 2),
-            "Strength": round(float(strength), 2)
-        }
-    return None
+    # === Pullback ===
+    pullback = (
+        last["Low"] <= last["ema_fast"] + (last["atr"] * 0.1)
+        and last["Close"] > last["ema_fast"]
+        and last["Close"] > last["Open"]
+    )
 
-def main():
-    results = []
-    for sym in TICKERS:
-        try:
-            res = compute_signal(sym)
-            if res:
-                results.append(res)
-        except Exception as e:
-            print(f"{sym}: error {e}")
+    # === ORB breakout ===
+    orb_breakout = orb_done and or_high is not None and last["Close"] > or_high
 
-    if not results:
-        print("No V18.2 signals found on last closed 30-min candle.")
-        return
+    buy = trend_up and ema_slope_up and vol_ok and (pullback or orb_breakout)
 
-    df = pd.DataFrame(results).sort_values("Strength", ascending=False)
-    print("\nV18.2 Signals (Top Momentum First)\n")
-    print(df.to_string(index=False))
+    near = trend_up and vol_ok and abs(last["Close"] - last["ema_fast"]) < last["atr"] * 0.25
 
-    df.to_csv("signals.csv", index=False)
-    print("\nSaved to signals.csv")
+    return buy, near
 
-if __name__ == "__main__":
-    main()
+
+# =============================
+# SCANNER
+# =============================
+
+results = []
+
+progress = st.progress(0)
+
+for i, ticker in enumerate(TICKERS):
+    try:
+        df = yf.download(
+            ticker,
+            period="10d",
+            interval="1h",
+            progress=False
+        )
+
+        if df is None or len(df) < 50:
+            continue
+
+        df = add_indicators(df)
+
+        buy, near = check_signal(df)
+
+        if buy:
+            status = "BUY"
+        elif near:
+            status = "NEAR"
+        else:
+            status = "NO TRADE"
+
+        results.append({
+            "Ticker": ticker,
+            "Signal": status,
+            "Price": round(df["Close"].iloc[-1], 2)
+        })
+
+    except Exception as e:
+        results.append({
+            "Ticker": ticker,
+            "Signal": "ERROR",
+            "Price": "-"
+        })
+
+    progress.progress((i + 1) / len(TICKERS))
+
+# =============================
+# OUTPUT
+# =============================
+
+df_out = pd.DataFrame(results)
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.subheader("BUY NOW")
+    st.dataframe(df_out[df_out["Signal"] == "BUY"])
+
+with col2:
+    st.subheader("NEAR SETUP")
+    st.dataframe(df_out[df_out["Signal"] == "NEAR"])
+
+with col3:
+    st.subheader("NO TRADE")
+    st.dataframe(df_out[df_out["Signal"] == "NO TRADE"])
+
+st.caption("Logic aligned with V18.2 Hybrid ORB + Trend Pullback (1H)")
