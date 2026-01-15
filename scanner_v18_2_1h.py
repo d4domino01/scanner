@@ -1,137 +1,115 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import time
+import numpy as np
+from datetime import datetime
 
-# ---------------- SETTINGS ----------------
-
+# ======================
+# CONFIG
+# ======================
 TICKERS = [
-    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA",
-    "JPM","BAC","WMT","COST","HD","KO","XOM","CVX",
-    "PEP","MCD","DIS","NFLX","UNH","LLY"
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","BRK-B","JPM",
+    "UNH","XOM","V","PG","MA","AVGO","COST","PEP","KO","WMT",
+    "HD","LLY","MRK","ABBV","CRM","NFLX","ADBE","ORCL","AMD","INTC",
+    "QCOM","TXN","AMAT","GE","CAT","BA","DE","GS","MS","BAC",
+    "SPY","QQQ","IWM","DIA","XLK","XLF","XLE","XLV","XLY"
 ]
 
-TF = "1h"
-FAST_EMA = 9
-SLOW_EMA = 21
-PULLBACK_PCT = 0.6 # distance to EMA fast
+EMA_FAST = 9
+EMA_SLOW = 21
+ATR_LEN = 14
 
-REFRESH_SEC = 300
-
-# ---------------- FUNCTIONS ----------------
-
-def get_data(ticker):
-    df = yf.download(ticker, period="10d", interval=TF, progress=False)
-    if df.empty or len(df) < 30:
-        return None
-    return df
-
-def add_indicators(df):
-    df["ema_fast"] = df["Close"].ewm(span=FAST_EMA).mean()
-    df["ema_slow"] = df["Close"].ewm(span=SLOW_EMA).mean()
-    df["hh"] = df["High"].rolling(5).max()
-    return df
-
-def classify(df):
-    c = df.iloc[-1]
-    p1 = df.iloc[-2]
-    p2 = df.iloc[-3]
-
-    trend = c["ema_fast"] > c["ema_slow"] and c["Close"] > c["ema_slow"]
-
-    pullback_zone = abs(c["Close"] - c["ema_fast"]) / c["Close"] < (PULLBACK_PCT / 100)
-    bullish = c["Close"] > c["Open"]
-
-    buy_now = trend and pullback_zone and bullish
-
-    recent_buy = False
-    for bar in [p1, p2]:
-        pb = abs(bar["Close"] - bar["ema_fast"]) / bar["Close"] < (PULLBACK_PCT / 100)
-        bull = bar["Close"] > bar["Open"]
-        if (bar["ema_fast"] > bar["ema_slow"]) and pb and bull:
-            recent_buy = True
-
-    trending = (
-        trend
-        and c["Close"] > c["ema_fast"]
-        and c["High"] >= df["hh"].iloc[-1]
-        and not pullback_zone
-    )
-
-    if buy_now:
-        return "BUY NOW"
-    elif recent_buy:
-        return "RECENT"
-    elif trending:
-        return "TRENDING"
-    else:
-        return "NO TRADE"
-
-# ---------------- UI ----------------
-
+# ======================
+# UI
+# ======================
 st.set_page_config(layout="wide")
-st.title("🔥 V18.2 Trend Pullback Scanner — 1H (Auto Refresh)")
-st.caption("Auto refresh every 5 minutes | BUY = pullback only | TRENDING = strong trend")
+st.title("📈 V18.2 Trend Pullback Scanner")
 
-placeholder = st.empty()
+tf = st.selectbox("Timeframe", ["30m", "1h"])
+refresh = st.button("🔄 Refresh Now")
 
-while True:
+st.write("BUY = pullback in trend | TRENDING = strong trend, waiting for pullback")
 
-    buy_list = []
-    recent_list = []
-    trending_list = []
-    no_trade_list = []
+# ======================
+# DATA
+# ======================
+interval = "30m" if tf == "30m" else "60m"
+period = "7d" if tf == "30m" else "14d"
 
-    for t in TICKERS:
+buy_list = []
+trend_list = []
+
+# ======================
+# FUNCTIONS
+# ======================
+def ema(series, n):
+    return series.ewm(span=n, adjust=False).mean()
+
+def atr(df, n):
+    tr = pd.concat([
+        df["High"] - df["Low"],
+        abs(df["High"] - df["Close"].shift()),
+        abs(df["Low"] - df["Close"].shift())
+    ], axis=1).max(axis=1)
+    return tr.rolling(n).mean()
+
+# ======================
+# SCAN
+# ======================
+with st.spinner("Scanning..."):
+
+    for ticker in TICKERS:
         try:
-            df = get_data(t)
-            if df is None:
+            df = yf.download(ticker, period=period, interval=interval, progress=False)
+            if len(df) < 50:
                 continue
-            df = add_indicators(df)
-            status = classify(df)
-            price = round(df["Close"].iloc[-1], 2)
 
-            row = {"Ticker": t, "Price": price, "Signal": status}
+            df["EMA_FAST"] = ema(df["Close"], EMA_FAST)
+            df["EMA_SLOW"] = ema(df["Close"], EMA_SLOW)
+            df["ATR"] = atr(df, ATR_LEN)
+            df["ATR_AVG"] = df["ATR"].rolling(20).mean()
 
-            if status == "BUY NOW":
-                buy_list.append(row)
-            elif status == "RECENT":
-                recent_list.append(row)
-            elif status == "TRENDING":
-                trending_list.append(row)
-            else:
-                no_trade_list.append(row)
+            last = df.iloc[-1]
+
+            # === V18.2 LOGIC ===
+            trend_up = last["EMA_FAST"] > last["EMA_SLOW"] and last["Close"] > last["EMA_SLOW"]
+            ema_slope = df["EMA_FAST"].iloc[-1] > df["EMA_FAST"].iloc[-2]
+            vol_ok = last["ATR"] > last["ATR_AVG"] * 0.8
+
+            pullback = (
+                last["Low"] <= last["EMA_FAST"] + last["ATR"] * 0.1 and
+                last["Close"] > last["EMA_FAST"] and
+                last["Close"] > last["Open"]
+            )
+
+            if trend_up and ema_slope and vol_ok and pullback:
+                buy_list.append(ticker)
+
+            elif trend_up and ema_slope:
+                trend_list.append(ticker)
 
         except:
             pass
 
-    with placeholder.container():
-        c1, c2, c3, c4 = st.columns(4)
+# ======================
+# DISPLAY
+# ======================
+col1, col2 = st.columns(2)
 
-        c1.subheader("🟢 BUY NOW")
-        if buy_list:
-            c1.dataframe(pd.DataFrame(buy_list), use_container_width=True)
-        else:
-            c1.write("empty")
+with col1:
+    st.subheader("🟢 BUY (Pullback Entry)")
+    if buy_list:
+        for t in buy_list:
+            st.success(t)
+    else:
+        st.write("No BUY setups right now")
 
-        c2.subheader("🟡 TRENDING (WAIT)")
-        if trending_list:
-            c2.dataframe(pd.DataFrame(trending_list), use_container_width=True)
-        else:
-            c2.write("empty")
+with col2:
+    st.subheader("🟡 TRENDING (Wait for Pullback)")
+    if trend_list:
+        for t in trend_list:
+            st.warning(t)
+    else:
+        st.write("No trending stocks right now")
 
-        c3.subheader("🔵 RECENT (≤2H)")
-        if recent_list:
-            c3.dataframe(pd.DataFrame(recent_list), use_container_width=True)
-        else:
-            c3.write("empty")
-
-        c4.subheader("🔴 NO TRADE")
-        if no_trade_list:
-            c4.dataframe(pd.DataFrame(no_trade_list), use_container_width=True)
-        else:
-            c4.write("empty")
-
-        st.caption("Logic aligned with V18.2 Hybrid ORB + Trend Pullback (1H)")
-
-    time.sleep(REFRESH_SEC)
+st.caption(f"Last scan: {datetime.now().strftime('%H:%M:%S')} | Timeframe: {tf}")
