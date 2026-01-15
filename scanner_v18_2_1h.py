@@ -1,145 +1,145 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import webbrowser
-from datetime import datetime
+import ta
 
-# ======================
-# CONFIG
-# ======================
-TICKERS = [
-    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","JPM","XOM",
-    "V","PG","MA","AVGO","COST","PEP","KO","WMT","HD","LLY",
-    "MRK","ABBV","CRM","NFLX","ADBE","ORCL","AMD","INTC","QCOM","TXN",
-    "AMAT","GE","CAT","BA","DE","GS","MS","BAC","SPY","QQQ",
-    "IWM","DIA","XLK","XLF","XLE","XLV","XLY"
+# =========================
+# SETTINGS
+# =========================
+
+TIMEFRAME = "15m"
+LOOKBACK_DAYS = "7d"
+
+WATCHLIST = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA",
+    "GOOGL", "AMD", "NFLX", "AVGO", "INTC"
 ]
 
-EMA_FAST = 9
-EMA_SLOW = 21
-ATR_LEN = 14
-
-# ======================
-# UI
-# ======================
-st.set_page_config(layout="wide")
-st.title("📈 V18.2 Trend Pullback Scanner — TradingView Linked")
-
-tf = st.selectbox("Timeframe", ["30m", "1h"])
-interval = "30m" if tf == "30m" else "60m"
-period = "7d" if tf == "30m" else "14d"
-
-st.caption("Signal logic IDENTICAL to your working V18.2 scanner")
-
-# ======================
+# =========================
 # FUNCTIONS
-# ======================
-def ema(series, n):
-    return series.ewm(span=n, adjust=False).mean()
+# =========================
 
-def atr(df, n):
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        abs(df["High"] - df["Close"].shift()),
-        abs(df["Low"] - df["Close"].shift())
-    ], axis=1).max(axis=1)
-    return tr.rolling(n).mean()
+def get_data(ticker):
+    df = yf.download(ticker, period=LOOKBACK_DAYS, interval=TIMEFRAME, progress=False)
+    if len(df) < 50:
+        return None
 
-def tv_link(ticker, tf):
-    interval = "60" if tf == "1h" else "30"
-    return f"https://www.tradingview.com/chart/?symbol={ticker}&interval={interval}"
+    df["ema9"] = ta.trend.ema_indicator(df["Close"], window=9)
+    df["ema21"] = ta.trend.ema_indicator(df["Close"], window=21)
+    df["atr"] = ta.volatility.average_true_range(df["High"], df["Low"], df["Close"], window=14)
 
-# ======================
-# SCAN
-# ======================
-buy_rows = []
-setup = []
-trending = []
+    return df.dropna()
 
-with st.spinner("Scanning market..."):
 
-    for ticker in TICKERS:
-        try:
-            df = yf.download(ticker, period=period, interval=interval, progress=False)
-            if len(df) < 50:
-                continue
+def classify_stock(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
-            df["EMA9"] = ema(df["Close"], 9)
-            df["EMA21"] = ema(df["Close"], 21)
-            df["ATR"] = atr(df, ATR_LEN)
-            df["ATR_AVG"] = df["ATR"].rolling(20).mean()
+    ema_fast = last["ema9"]
+    ema_slow = last["ema21"]
+    close = last["Close"]
+    low = last["Low"]
+    open_ = last["Open"]
 
-            last = df.iloc[-1]
-            prev = df.iloc[-2]
+    atr = last["atr"]
 
-            # ===== ORIGINAL V18.2 LOGIC (UNCHANGED) =====
-            trend_up = last["EMA9"] > last["EMA21"] and last["Close"] > last["EMA21"]
-            ema_slope = last["EMA9"] > prev["EMA9"]
-            vol_ok = last["ATR"] > last["ATR_AVG"] * 0.8
+    # ===== TREND FILTER =====
+    trend_up = ema_fast > ema_slow and close > ema_slow
+    ema_slope_up = ema_fast > prev["ema9"]
 
-            pullback_zone = last["Low"] <= last["EMA9"] + last["ATR"] * 0.1
-            bullish = last["Close"] > last["Open"]
-            pullback = pullback_zone and bullish and last["Close"] > last["EMA9"]
+    # ===== OVEREXTENSION =====
+    ema_dist_pct = (close - ema_fast) / close * 100
+    overextended = ema_dist_pct > 1.2
 
-            # ===== SCORE (DISPLAY ONLY) =====
-            score = 0
-            score += min((last["EMA9"] - last["EMA21"]) / last["Close"] * 500, 30)
-            score += min((last["EMA9"] - prev["EMA9"]) / last["Close"] * 800, 25)
-            score += min((last["ATR"] / last["ATR_AVG"]) * 20, 25)
-            score += 20 if pullback else 0
+    # ===== EMA ZONE RETEST =====
+    ema_zone_retest = (
+        (low <= ema_fast and low >= ema_slow) or
+        (low <= ema_slow and close > ema_slow)
+    )
 
-            stop = last["EMA9"] - last["ATR"] * 1.2
+    # ===== BULLISH RECLAIM =====
+    bullish_reclaim = close > open_ and close > ema_fast
 
-            if trend_up and ema_slope and vol_ok and pullback:
-                buy_rows.append([
-                    ticker,
-                    round(score,1),
-                    round(last["Close"],2),
-                    round(stop,2),
-                    tv_link(ticker, tf)
-                ])
+    strong_trend = trend_up and ema_slope_up
 
-            elif trend_up and ema_slope and pullback_zone:
-                setup.append((ticker, tv_link(ticker, tf)))
+    # ===== CATEGORIES =====
 
-            elif trend_up and ema_slope:
-                trending.append((ticker, tv_link(ticker, tf)))
+    if strong_trend and not overextended and ema_zone_retest and bullish_reclaim:
+        return "BUY"
 
-        except:
-            pass
+    if strong_trend and overextended:
+        return "WAIT"
 
-# ======================
+    return "NO TRADE"
+
+
+# =========================
+# SPY MARKET FILTER
+# =========================
+
+spy_df = get_data("SPY")
+market_ok = False
+
+if spy_df is not None:
+    spy_last = spy_df.iloc[-1]
+    market_ok = spy_last["Close"] > spy_last["ema21"]
+
+# =========================
+# STREAMLIT UI
+# =========================
+
+st.set_page_config(layout="wide")
+st.title("🔥 V18.2 Trend Pullback Scanner — 15m (Confirmed Entry Logic)")
+st.caption("BUY = confirmed execution | WAIT = strong trend but extended | NO TRADE = skip")
+
+st.write(f"📊 **Market Filter (SPY > EMA21):** {'✅ OK' if market_ok else '❌ WEAK — NO BUY SIGNALS'}")
+
+buy_list = []
+wait_list = []
+no_trade_list = []
+
+for ticker in WATCHLIST:
+    df = get_data(ticker)
+    if df is None:
+        continue
+
+    category = classify_stock(df)
+
+    if category == "BUY" and market_ok:
+        buy_list.append(ticker)
+    elif category == "WAIT":
+        wait_list.append(ticker)
+    else:
+        no_trade_list.append(ticker)
+
+# =========================
 # DISPLAY
-# ======================
-st.subheader("🟢 BUY NOW — Ranked")
+# =========================
 
-if buy_rows:
-    df_buy = pd.DataFrame(buy_rows, columns=["Ticker","Score","Entry","Stop","Chart"])
-    df_buy = df_buy.sort_values("Score", ascending=False)
-    st.dataframe(df_buy, use_container_width=True)
+col1, col2, col3 = st.columns(3)
 
-    top = df_buy.iloc[0]["Chart"]
-    if "last_opened" not in st.session_state or st.session_state["last_opened"] != top:
-        webbrowser.open_new_tab(top)
-        st.session_state["last_opened"] = top
-else:
-    st.write("No BUY setups right now")
+with col1:
+    st.subheader("🟢 BUY NOW")
+    if buy_list:
+        for t in buy_list:
+            st.success(t)
+    else:
+        st.write("empty")
 
-c1, c2 = st.columns(2)
+with col2:
+    st.subheader("🟡 TRENDING (WAIT)")
+    if wait_list:
+        for t in wait_list:
+            st.warning(t)
+    else:
+        st.write("empty")
 
-with c1:
-    st.subheader("🟡 SETUP (forming)")
-    for t, link in setup:
-        st.markdown(f"- [{t}]({link})")
-    if not setup:
-        st.write("None")
+with col3:
+    st.subheader("🔴 NO TRADE")
+    if no_trade_list:
+        for t in no_trade_list:
+            st.info(t)
+    else:
+        st.write("empty")
 
-with c2:
-    st.subheader("🔵 TRENDING")
-    for t, link in trending:
-        st.markdown(f"- [{t}]({link})")
-    if not trending:
-        st.write("None")
-
-st.caption(f"Scan time: {datetime.now().strftime('%H:%M:%S')} | TF: {tf}")
+st.caption("Logic aligned with TradingView V18.2 confirmed ENTRY triangles (15m timeframe)")
