@@ -2,7 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import webbrowser
+from datetime import datetime
 
 # ======================
 # CONFIG
@@ -23,16 +24,13 @@ ATR_LEN = 14
 # UI
 # ======================
 st.set_page_config(layout="wide")
-st.title("📈 V18.2 Trend Pullback Scanner — Safe+ Version")
+st.title("📈 V18.2 Trend Pullback Scanner — TradingView Linked")
 
 tf = st.selectbox("Timeframe", ["30m", "1h"])
 interval = "30m" if tf == "30m" else "60m"
 period = "7d" if tf == "30m" else "14d"
 
-st.caption("Logic identical to your working V18.2 scanner — only display features added")
-
-# Auto refresh every 5 minutes
-st_autorefresh = st.experimental_rerun if False else None
+st.caption("Signal logic IDENTICAL to your working V18.2 scanner")
 
 # ======================
 # FUNCTIONS
@@ -47,6 +45,10 @@ def atr(df, n):
         abs(df["Low"] - df["Close"].shift())
     ], axis=1).max(axis=1)
     return tr.rolling(n).mean()
+
+def tv_link(ticker, tf):
+    interval = "60" if tf == "1h" else "30"
+    return f"https://www.tradingview.com/chart/?symbol={ticker}&interval={interval}"
 
 # ======================
 # SCAN
@@ -95,15 +97,14 @@ with st.spinner("Scanning market..."):
                     round(score,1),
                     round(last["Close"],2),
                     round(stop,2),
-                    datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    tf
+                    tv_link(ticker, tf)
                 ])
 
             elif trend_up and ema_slope and pullback_zone:
-                setup.append(ticker)
+                setup.append((ticker, tv_link(ticker, tf)))
 
             elif trend_up and ema_slope:
-                trending.append(ticker)
+                trending.append((ticker, tv_link(ticker, tf)))
 
         except:
             pass
@@ -114,23 +115,31 @@ with st.spinner("Scanning market..."):
 st.subheader("🟢 BUY NOW — Ranked")
 
 if buy_rows:
-    df_buy = pd.DataFrame(buy_rows, columns=["Ticker","Score","Entry","Stop","Time","TF"])
+    df_buy = pd.DataFrame(buy_rows, columns=["Ticker","Score","Entry","Stop","Chart"])
     df_buy = df_buy.sort_values("Score", ascending=False)
     st.dataframe(df_buy, use_container_width=True)
 
-    csv = df_buy.to_csv(index=False).encode("utf-8")
-    st.download_button("📥 Download BUY list (CSV)", csv, "v18_buy_signals.csv", "text/csv")
+    top = df_buy.iloc[0]["Chart"]
+    if "last_opened" not in st.session_state or st.session_state["last_opened"] != top:
+        webbrowser.open_new_tab(top)
+        st.session_state["last_opened"] = top
 else:
     st.write("No BUY setups right now")
 
 c1, c2 = st.columns(2)
 
 with c1:
-    st.subheader("🟡 SETUP (Pullback forming)")
-    st.write(", ".join(setup) if setup else "None")
+    st.subheader("🟡 SETUP (forming)")
+    for t, link in setup:
+        st.markdown(f"- [{t}]({link})")
+    if not setup:
+        st.write("None")
 
 with c2:
-    st.subheader("🔵 TRENDING (Wait for pullback)")
-    st.write(", ".join(trending) if trending else "None")
+    st.subheader("🔵 TRENDING")
+    for t, link in trending:
+        st.markdown(f"- [{t}]({link})")
+    if not trending:
+        st.write("None")
 
 st.caption(f"Scan time: {datetime.now().strftime('%H:%M:%S')} | TF: {tf}")
