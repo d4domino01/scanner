@@ -3,9 +3,10 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import os
 
 st.set_page_config(layout="wide")
-st.title("🔥 V18.2 Hybrid ORB + Trend Pullback Scanner (15 MIN)")
+st.title("🔥 V18.2 Hybrid ORB + Trend Pullback Scanner (CONFIRMED ENTRY)")
 
 # =============================
 # SETTINGS
@@ -24,6 +25,11 @@ EMA_SLOW = 21
 ATR_LEN = 14
 ATR_AVG_LEN = 20
 ORB_MINUTES = 30
+
+LOG_FILE = "buy_log.csv"
+
+if not os.path.exists(LOG_FILE):
+    pd.DataFrame(columns=["Date", "Time", "Ticker", "Price"]).to_csv(LOG_FILE, index=False)
 
 # =============================
 # FUNCTIONS
@@ -58,9 +64,9 @@ def get_orb_levels(df):
     today = df["date"].iloc[-1]
     day_df = df[df["date"] == today]
 
-    bars_needed = int(ORB_MINUTES / 15)
+    bars_needed = int(ORB_MINUTES / 60 * len(day_df))
 
-    if len(day_df) < bars_needed:
+    if len(day_df) < bars_needed or bars_needed < 1:
         return None, None, False
 
     orb_df = day_df.iloc[:bars_needed]
@@ -115,13 +121,7 @@ progress = st.progress(0)
 
 for i, ticker in enumerate(TICKERS):
     try:
-        df = yf.download(
-            ticker,
-            period="10d",
-            interval="15m",
-            progress=False
-        )
-
+        df = yf.download(ticker, period="10d", interval="1h", progress=False)
         df = clean_df(df)
 
         if df is None or len(df) < 50:
@@ -130,24 +130,36 @@ for i, ticker in enumerate(TICKERS):
         df = add_indicators(df)
         signal = check_signal(df)
 
-        signal_time = df.index[-1].strftime("%Y-%m-%d %H:%M")
+        price = round(df["Close"].iloc[-1], 2)
 
         results.append({
             "Ticker": ticker,
             "Signal": signal,
-            "Price": round(df["Close"].iloc[-1], 2),
-            "Signal Time": signal_time
+            "Price": price
         })
 
-    except Exception as e:
+        # ===== LOG BUY SIGNAL =====
+        if signal == "BUY":
+            now = datetime.now()
+
+            log_row = {
+                "Date": now.date().isoformat(),
+                "Time": now.strftime("%H:%M"),
+                "Ticker": ticker,
+                "Price": price
+            }
+
+            pd.DataFrame([log_row]).to_csv(LOG_FILE, mode="a", header=False, index=False)
+
+    except Exception:
         results.append({
             "Ticker": ticker,
             "Signal": "ERROR",
-            "Price": "-",
-            "Signal Time": "-"
+            "Price": "-"
         })
 
     progress.progress((i + 1) / len(TICKERS))
+
 
 # =============================
 # OUTPUT
@@ -169,4 +181,39 @@ with col3:
     st.subheader("🔴 NO TRADE")
     st.dataframe(df_out[df_out["Signal"] == "NO TRADE"], use_container_width=True)
 
-st.caption("Scanner timeframe: 15-minute | Logic aligned with V18.2 confirmed-entry strategy")
+st.caption("Logic aligned with TradingView V18.2 CONFIRMED ENTRY triangles (EMA retest + bullish reclaim)")
+
+
+# =============================
+# 📅 DOWNLOAD BUY LOG BY DATE
+# =============================
+
+st.divider()
+st.subheader("📅 Download BUY Signals by Date")
+
+log_df = pd.read_csv(LOG_FILE)
+
+if len(log_df) == 0:
+    st.info("No BUY signals logged yet.")
+else:
+    log_df["Date"] = pd.to_datetime(log_df["Date"])
+
+    colA, colB = st.columns(2)
+    with colA:
+        start_date = st.date_input("From", log_df["Date"].min().date())
+    with colB:
+        end_date = st.date_input("To", log_df["Date"].max().date())
+
+    mask = (log_df["Date"] >= pd.to_datetime(start_date)) & (log_df["Date"] <= pd.to_datetime(end_date))
+    filtered = log_df[mask]
+
+    st.dataframe(filtered, use_container_width=True)
+
+    csv = filtered.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        "📥 Download Selected Period (CSV)",
+        csv,
+        file_name=f"buy_signals_{start_date}_to_{end_date}.csv",
+        mime="text/csv"
+    )
