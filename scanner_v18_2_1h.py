@@ -26,11 +26,6 @@ ATR_LEN = 14
 ATR_AVG_LEN = 20
 ORB_MINUTES = 30
 
-LOG_FILE = "buy_log.csv"
-
-if not os.path.exists(LOG_FILE):
-    pd.DataFrame(columns=["Date", "Time", "Ticker", "Price"]).to_csv(LOG_FILE, index=False)
-
 # =============================
 # FUNCTIONS
 # =============================
@@ -130,32 +125,22 @@ for i, ticker in enumerate(TICKERS):
         df = add_indicators(df)
         signal = check_signal(df)
 
+        signal_time = df.index[-1].strftime("%H:%M")
         price = round(df["Close"].iloc[-1], 2)
 
         results.append({
             "Ticker": ticker,
             "Signal": signal,
-            "Price": price
+            "Price": price,
+            "Time": signal_time
         })
-
-        # ===== LOG BUY SIGNAL =====
-        if signal == "BUY":
-            now = datetime.now()
-
-            log_row = {
-                "Date": now.date().isoformat(),
-                "Time": now.strftime("%H:%M"),
-                "Ticker": ticker,
-                "Price": price
-            }
-
-            pd.DataFrame([log_row]).to_csv(LOG_FILE, mode="a", header=False, index=False)
 
     except Exception:
         results.append({
             "Ticker": ticker,
             "Signal": "ERROR",
-            "Price": "-"
+            "Price": "-",
+            "Time": "-"
         })
 
     progress.progress((i + 1) / len(TICKERS))
@@ -182,38 +167,3 @@ with col3:
     st.dataframe(df_out[df_out["Signal"] == "NO TRADE"], use_container_width=True)
 
 st.caption("Logic aligned with TradingView V18.2 CONFIRMED ENTRY triangles (EMA retest + bullish reclaim)")
-
-
-# =============================
-# 📅 DOWNLOAD BUY LOG BY DATE
-# =============================
-
-st.divider()
-st.subheader("📅 Download BUY Signals by Date")
-
-log_df = pd.read_csv(LOG_FILE)
-
-if len(log_df) == 0:
-    st.info("No BUY signals logged yet.")
-else:
-    log_df["Date"] = pd.to_datetime(log_df["Date"])
-
-    colA, colB = st.columns(2)
-    with colA:
-        start_date = st.date_input("From", log_df["Date"].min().date())
-    with colB:
-        end_date = st.date_input("To", log_df["Date"].max().date())
-
-    mask = (log_df["Date"] >= pd.to_datetime(start_date)) & (log_df["Date"] <= pd.to_datetime(end_date))
-    filtered = log_df[mask]
-
-    st.dataframe(filtered, use_container_width=True)
-
-    csv = filtered.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        "📥 Download Selected Period (CSV)",
-        csv,
-        file_name=f"buy_signals_{start_date}_to_{end_date}.csv",
-        mime="text/csv"
-    )
