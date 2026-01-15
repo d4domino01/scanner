@@ -58,7 +58,7 @@ def get_orb_levels(df):
     today = df["date"].iloc[-1]
     day_df = df[df["date"] == today]
 
-    bars_needed = int(ORB_MINUTES / 15) # 15-min candles
+    bars_needed = int(ORB_MINUTES / 15)
 
     if len(day_df) < bars_needed:
         return None, None, False
@@ -78,27 +78,21 @@ def check_signal(df):
 
     or_high, or_low, orb_done = get_orb_levels(df)
 
-    # ===== Trend filter =====
     trend_up = last["ema_fast"] > last["ema_slow"] and last["Close"] > last["ema_slow"]
     ema_slope_up = last["ema_fast"] > prev["ema_fast"]
 
-    # ===== Volatility =====
     vol_ok = last["atr"] > last["atr_avg"] * 0.8
 
-    # ===== EMA zone retest =====
     ema_zone = (
         (last["Low"] <= last["ema_fast"] and last["Low"] >= last["ema_slow"]) or
         (last["Low"] <= last["ema_slow"] and last["Close"] > last["ema_slow"])
     )
 
-    # ===== Bullish reclaim candle =====
     bullish_reclaim = last["Close"] > last["Open"] and last["Close"] > last["ema_fast"]
 
-    # ===== Overextension =====
     ema_dist = abs(last["Close"] - last["ema_fast"]) / last["Close"] * 100
     overextended = ema_dist > 1.2
 
-    # ===== ORB breakout =====
     orb_breakout = orb_done and or_high is not None and last["Close"] > or_high
 
     base_long = trend_up and ema_slope_up and vol_ok and (ema_zone or orb_breakout)
@@ -136,17 +130,21 @@ for i, ticker in enumerate(TICKERS):
         df = add_indicators(df)
         signal = check_signal(df)
 
+        signal_time = df.index[-1].strftime("%Y-%m-%d %H:%M")
+
         results.append({
             "Ticker": ticker,
             "Signal": signal,
-            "Price": round(df["Close"].iloc[-1], 2)
+            "Price": round(df["Close"].iloc[-1], 2),
+            "Signal Time": signal_time
         })
 
     except Exception as e:
         results.append({
             "Ticker": ticker,
             "Signal": "ERROR",
-            "Price": "-"
+            "Price": "-",
+            "Signal Time": "-"
         })
 
     progress.progress((i + 1) / len(TICKERS))
